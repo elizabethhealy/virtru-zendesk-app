@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link href="https://sdk.virtru.com/js/latest/auth-widget/index.css" rel="stylesheet"></script>
+  <style type="text/css">
+    @import url("https://fonts.googleapis.com/css?family=Raleway");
+    .hide {
+      display: none;
+    }
+    .show {
+      display: block;
+    }
+    .vbutton {
+      background-color: #3668FF; /* Green */
+      border: none;
+      color: white;
+      font-family: 'Raleway';
+    }
+  </style>
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+  <script src="https://sdk.virtru.com/js/latest/virtru-sdk.min.js"></script>
+  <script src="https://sdk.virtru.com/js/latest/auth-widget/index.js"></script>
+</head>
+<body>
+  </br>
+  <div id="virtru-auth-widget-mount"></div>
+  <!-- <label for="data">Select file:</label> -->
+  <input type="file" name="data[]" id="data" style="display:none;" multiple>
+  <button type="button" id="upload_button" onclick="doit()" style="display:none; font-family:'Raleway'; height:70px;"
+     class="virtru-auth-button-virtru">Upload, Encrypt, & Send</button>
+  </br></br>
+  <script src="https://static.zdassets.com/zendesk_app_framework_sdk/2.0/zaf_sdk.min.js"></script>
+  <script>
+    // storing the emails for dissems list
+    var emails = [];
+
+    var zd_client = ZAFClient.init()
+    zd_client.invoke('resize', { width: '500px', height: '400px' })
+
+    const authWidgetMount = document.getElementById('virtru-auth-widget-mount')
+    let token_value_from_upload;
+    let virtru_client;
+
+    Virtru.AuthWidget('virtru-auth-widget-mount', { afterAuth: init });
+
+
+
+    function init (email) {
+      virtru_client = new Virtru.Client({email});
+      // Destroy the auth widget
+      authWidgetMount.className = ' hide';
+      //reveal the upload button and resize the pop up
+      document.getElementById("upload_button").style.display = "block";
+      zd_client.invoke('resize', { width: '125px', height: '100%' })
+
+    }
+
+    // upload selected file
+    async function doit() {
+      //retrieve the uploaded file
+      await new Promise((resolve, reject) => {
+        document.getElementById("data").click()
+        document.getElementById("data").onchange = function(){
+          resolve("finished");
+        };
+      });
+      console.log("after await");
+      const reader = new FileReader();
+      var file = data.files[0];
+      console.log(file);
+      // let encrypt_file;
+      const file_name=file.name+".tdf.html";
+      reader.addEventListener('progress', (e) => {
+        console.log('Progress', e, reader);
+      })
+      reader.addEventListener('load', async (e) => {
+        //once we've read the file, let's encrypt it
+        console.log("before encrypt");
+        //get the emails necessary for the dissems list and store in emails list
+        await getEmails();
+        console.log("emails");
+        //encrypt the file and produce tdf
+        encrypt(file, reader.result, emails).then(function(res){
+          console.log("calling upload file");
+          //upload the encrypted file to zendesk
+          uploadFile(res, file_name);
+        });
+      });
+      reader.addEventListener('error', (e) => {
+        console.log('Could not read file', e);
+      });
+
+      reader.readAsText(file);
+      console.log("read as text");
+    }
+
+    //get all the necessary dissems
+    function getEmails(){
+      return new Promise((resolve, reject) => {
+        //first add the ticket requester (customer) email to the dissems
+        zd_client.get('ticket.requester').then((response) => {
+        console.log("2: ", response);
+        emails.push(response['ticket.requester'].email)
+        //then get the assignee (group or person) email(s)
+        zd_client.get('ticket.assignee').then((response) => {
+        console.log("1: ", response);
+        if(response['ticket.assignee'].user){
+          //if there is a single user asignee just get their email and add
+          emails.push(response['ticket.assignee'].user.email);
+        }
+        if(response['ticket.assignee'].group){
+          //if there is a group asignee get all their emails
+          let id = response['ticket.assignee'].group.id;
+          var options = {
+            url: "/api/v2/groups/" + id.toString() +"/memberships.json",
+            type: 'GET'
+          };
+          console.log(options);
+
+          //this is called for each userid in the group to retrieve their info
+          function userGetter(item){
+            //GET /api/v2/users/{user_id}
+            return new Promise((resolve, reject) => {
+              var options = {
+                url: "/api/v2/users/" + item.user_id.toString()+".json",
+                type: 'GET'
+              };
+              //get the user info
+              zd_client.request(options).then(function(response_to_get_user) {
+                // console.log(response_to_get_user);
+                console.log("user");
+                emails.push(response_to_get_user["user"].email);
+                resolve("finished");
+              })
+            });
+          }
+
+          //get all the members in the group
+          zd_client.request(options).then(
+            async function(response_to_get_members) {
+              //for each member, get their info and their email to emails list
+              await Promise.all(response_to_get_members['group_memberships'].map(async (item) => {
+                await userGetter(item);
+              })).then(
+              console.log("Successful ticket membership response here:"));
+              resolve("finished");
+            },
+            function(error_updating_ticket){
+                console.log("Error ticket membership response here:", error_updating_ticket)
+            });
+          }
+          })
+        });
+      });
+    }
+
+    //upload the file to zendesk
+    function uploadFile(encrypt_file_input, file_name){
+      console.log("upload file");
+
+      // this uploads a file to the zendesk server and returns a token_id for that file
+      // zendesk is weird with binary file uploads: see https://support.zendesk.com/hc/en-us/articles/223137947/comments/360005290474
+      $.ajax({
+        url: "https://virtru.zendesk.com/api/v2/uploads.json?filename=" + file_name,
+        type: 'POST',
+        data: encrypt_file_input,
+        dataType: 'json',
+        processData: false,
+        contentType: 'application/binary',
+        success: function(response) {
+          console.log(response)
+          token_value_from_upload = response.upload.token
+          //then attach the file to the ticket
+          doattach()
+        }
+      })
+    }
+
+    //encrypt the file
+    function encrypt (file, content, emails=[]) {
+      //basic encrypt process
+      console.log('Encrypting...')
+      console.log(emails);
+      const policy = new Virtru.PolicyBuilder().addUsersWithAccess(emails).build();
+      const encryptParams = new Virtru.EncryptParamsBuilder()
+        .withStringSource(content)
+        .withPolicy(policy)
+        .withDisplayFilename(file.name)
+        .build();
+      return virtru_client.encrypt(encryptParams)
+        .then(ct => ct.toString())
+        .then(s => {
+          console.log('ENCRYPTED:', btoa(s))
+          return s;
+        })
+        .then(s => {
+          //convert what is returned to a file object
+          console.log("about to return")
+          return new File([s], file.name+".tdf.html", {
+        type: 'application/json;charset=binary',
+        })
+      })
+    }
+
+    // attach uploaded file to ticket
+    function doattach() {
+      console.log("do attach")
+      console.log("before text");
+      //get the text that is currently in the ticket comment drafting area
+      zd_client.get('ticket.comment.text').then((resp) => {
+        //need to convert it from html to plaintext
+        let ptf = resp["ticket.comment.text"].trim();
+        var tempDivElement = document.createElement("div");
+        tempDivElement.innerHTML = ptf;
+        ptf = tempDivElement.textContent || tempDivElement.innerText || "";
+        if(!ptf){
+          ptf = "Virtru encrypted file attached.";
+        }
+      
+        //this needs to be updated to accomodate numtiple file uploads
+        console.log(ptf);
+        var ticket_update = '{"ticket": {"comment":  { "body": "'+ptf+'", "uploads":  ["' 
+          + token_value_from_upload + '"] }}}'
+
+        //get the current ticket id
+        zd_client.get('ticket.id').then(function(response_for_id) {
+
+            var options = {
+              url: "/api/v2/tickets/" + response_for_id["ticket.id"].toString(),
+              type: 'PUT',
+              data: ticket_update,
+              dataType: 'json',
+              processData: false,
+              contentType: 'application/json'
+            }
+            console.log(options)
+
+            //post a comment with the text we got and with the file we uploaded
+            zd_client.request(options).then(
+              function(response_to_update_ticket) {
+                console.log("Successful ticket update response here:", response_to_update_ticket);
+                //remove the text from the comment draft area
+                zd_client.set('ticket.comment.text', "");
+              },
+              function(error_updating_ticket){
+                  console.log("Error ticket update response here:", error_updating_ticket)
+              })
+          });
+        });
+    }
+  </script>
+</body>
+</html>
